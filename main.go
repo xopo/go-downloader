@@ -19,7 +19,6 @@ func main() {
 	header := make(map[string]string)
 	header["User-Agent"] = "Chrome/83.0.4103.61 Safari/537.36"
 
-	fmt.Println("Starting")
 	entries := getEntries()
 	fmt.Printf("Found %d entries to download\n", len(entries))
 	for _, link := range entries {
@@ -89,7 +88,6 @@ func cleanUp() {
 
 	fmt.Printf("Found %d files\n", len(dirEntries))
 	for _, entry := range dirEntries {
-		// fmt.Printf("%#v", entry)
 		if !entry.IsDir() {
 			file := entry.Name()
 			fileExt := filepath.Ext(file)
