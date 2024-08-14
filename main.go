@@ -15,36 +15,101 @@ import (
 
 const destination = "result"
 
-func main() {
-	header := make(map[string]string)
-	header["User-Agent"] = "Chrome/83.0.4103.61 Safari/537.36"
+func titleAsm3u(title string) string {
+	return title + ".m3u8"
+}
 
+func titleAsmp4(title string) string {
+	return title + ".mp4"
+}
+
+func main() {
 	entries := getEntries()
+	downloadChannel := make(chan VideoEntry)
+	convertedChannel := make(chan string)
+	cleanupChannel := make(chan VideoEntry)
+
+	checkDestinationDir()
 	fmt.Printf("Found %d entries to download\n", len(entries))
-	for _, link := range entries {
-		if !checkResultExists(link.Title) {
-			m3u8file := strings.Replace(link.Title, "mp4", "m3u8", 1)
-			if checkResultExists(m3u8file) {
-				fmt.Println("Converting --- " + m3u8file)
-				convertFile(m3u8file)
-			} else {
-				fmt.Println("Downloading --- " + link.Title)
-				downloader := hlsdl.New(link.Link, header, destination, m3u8file, 64, true)
-				fmt.Printf("start downloading: %s\n", link.Title)
-				filepath, err := downloader.Download()
-				if err != nil {
-					fmt.Printf("problem downloading %s : %s\n", link.Title, err)
-				}
-				fmt.Println("Finished: ", filepath)
-				convertFile(m3u8file)
-			}
-		}
+	filesToDownload := getNewFiles(entries)
+	if len(filesToDownload) > 0 {
+		go func() {
+			getFiles(filesToDownload, downloadChannel)
+		}()
 	}
 
-	fmt.Println()
-	fmt.Println()
-	fmt.Println()
+	go func() {
+		convertFile(downloadChannel, convertedChannel, cleanupChannel)
+	}()
+
+	go func() {
+		cleanUpFiles(cleanupChannel)
+	}()
+
+	for msg := range convertedChannel {
+		fmt.Println(msg)
+	}
 	cleanUp()
+}
+
+func getNewFiles(entries []VideoEntry) []VideoEntry {
+	newFiles := []VideoEntry{}
+	for _, entry := range entries {
+		if !checkResultExists(titleAsm3u(entry.Title)) && !checkResultExists(titleAsmp4(entry.Title)) {
+			newFiles = append(newFiles, entry)
+		}
+	}
+	return newFiles
+}
+
+func getDownloadedVideos(entries []VideoEntry) []VideoEntry {
+	newFiles := []VideoEntry{}
+	for _, entry := range entries {
+		if !checkResultExists(titleAsmp4(entry.Title)) {
+			newFiles = append(newFiles, entry)
+		}
+	}
+	return newFiles
+}
+
+func getFiles(files []VideoEntry, downChannel chan<- VideoEntry) {
+	for _, file := range files {
+		header := make(map[string]string)
+		header["User-Agent"] = "Chrome/83.0.4103.61 Safari/537.36"
+
+		fmt.Printf("start downloading: %s\n", file.Title)
+		target := titleAsm3u(file.Title)
+		downloader := hlsdl.New(file.Link, header, destination, target, 64, true)
+		filepath, err := downloader.Download()
+		if err != nil {
+			log.Fatalf("problem downloading %s : %s\n", file.Title, err)
+		}
+		fmt.Println("Finished: ", filepath)
+		downChannel <- file
+	}
+	close(downChannel)
+}
+
+func getNumberOfExistingMp4(entries []VideoEntry) int {
+	var result []string
+	for _, entry := range entries {
+		mp4 := titleAsmp4(entry.Title)
+		if checkResultExists(mp4) {
+			result = append(result, entry.Title)
+		}
+	}
+	return len(result)
+}
+
+func checkDestinationDir() {
+	res, err := os.Stat(destination)
+	if err != nil {
+		os.Mkdir(destination, 0755)
+		return
+	}
+	if !res.IsDir() {
+		log.Fatalf("Destination cannot be created, pls create a %q dir for results", destination)
+	}
 }
 
 type VideoEntry struct {
@@ -60,7 +125,8 @@ func getEntries() []VideoEntry {
 	}
 	if !file.IsDir() {
 		content, err := os.ReadFile(filename)
-		if err != nil {
+		validJson := json.Valid(content)
+		if err != nil && validJson {
 			log.Fatal("Reading imposible", err)
 		}
 		var entries []VideoEntry
@@ -77,6 +143,18 @@ func checkResultExists(file string) bool {
 	filePath := path.Join(destination, file)
 	_, err := os.Stat(filePath)
 	return err == nil
+}
+
+func cleanUpFiles(cleanupChannel <-chan VideoEntry) {
+	for file := range cleanupChannel {
+		fileWithPath := path.Join(destination, titleAsm3u(file.Title))
+		_, err := os.Stat(fileWithPath)
+		if err != nil {
+			log.Fatal(err)
+			return
+		}
+		os.Remove(fileWithPath)
+	}
 }
 
 func cleanUp() {
@@ -115,32 +193,28 @@ func cleanUp() {
 	}
 }
 
-func convertFile(file string) {
-	convertedfile := path.Join(destination, strings.Replace(file, "m3u8", "mp4", 1))
-	filePath := path.Join(destination, file)
+func convertFile(downloadChannel <-chan VideoEntry, convertedChannel chan<- string, cleanupChannel chan<- VideoEntry) {
+	for file := range downloadChannel {
+		mp4 := path.Join(destination, titleAsmp4(file.Title))
+		m3u := path.Join(destination, titleAsm3u(file.Title))
 
-	cmd := exec.Command("ffmpeg", "-i", filePath, "-c", "copy", convertedfile)
-	fmt.Println()
-	fmt.Println()
+		cmd := exec.Command("ffmpeg", "-i", m3u, "-c", "copy", mp4)
+		fmt.Println()
+		fmt.Println()
 
-	// cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+		// cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 
-	fmt.Printf("converting \n%s \n%s\n\n", filePath, convertedfile)
-	err := cmd.Run()
-	fmt.Println("== end of conversion")
-	fmt.Println()
-	fmt.Println()
+		convertedChannel <- fmt.Sprintf("converting \n%s \n%s\n\n", m3u, mp4)
+		err := cmd.Run()
+		convertedChannel <- fmt.Sprintln("== end of conversion")
 
-	if err != nil {
-		log.Fatal("Error converting file", err)
-	}
-	if checkResultExists(convertedfile) {
-		err := os.Remove(filePath)
 		if err != nil {
-			log.Fatalf("Cannot remove %s: %s ", filePath, err)
+			log.Fatalf("Error converting file %q", err)
 		}
-	} else {
-		fmt.Println("Cannot find convertedfile", filePath)
+
+		cleanupChannel <- file
 	}
+	close(convertedChannel)
+	close(cleanupChannel)
 }
